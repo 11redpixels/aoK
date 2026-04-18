@@ -1,0 +1,8 @@
+{
+  "name": "esm-project",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  }
+}
