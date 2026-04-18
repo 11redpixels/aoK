@@ -11,10 +11,16 @@ export abstract class BaseAgent {
     this.record = record;
     this.ledger = ledger;
 
+    const envProvider = process.env.AOK_LLM_PROVIDER;
+    const detectedProvider = envProvider || record.provider_metadata.provider || 'openai';
+    // Auto-detect OpenRouter from key prefix if provider not explicitly overridden
+    const apiKey = process.env.AOK_API_KEY;
+    const effectiveProvider = (!envProvider && apiKey && apiKey.startsWith('sk-or-')) ? 'openrouter' : detectedProvider;
+
     const llmConfig: AOKConfigLLM = {
-      provider: record.provider_metadata.provider || 'openai',
+      provider: effectiveProvider as any,
       model: record.provider_metadata.model || 'gpt-4o',
-      apiKey: process.env.AOK_API_KEY
+      apiKey: apiKey
     };
     this.llm = createLLMProvider(llmConfig);
   }

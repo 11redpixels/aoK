@@ -46,9 +46,12 @@ export class OpenAIProvider implements LLMProvider {
       return `[SIMULATED EXECUTION] Mocked payload for explicit AOK_SIMULATION_MODE. PASS`;
     }
     
+    const effectiveModel = process.env.AOK_LLM_MODEL || this.model;
+    const maxTokens = parseInt(process.env.AOK_MAX_TOKENS || '800', 10);
     const response = await this.openai.chat.completions.create({
-      model: this.model,
+      model: effectiveModel,
       messages: messages as any,
+      max_tokens: maxTokens,
     });
     return response.choices[0]?.message?.content || '';
   }
