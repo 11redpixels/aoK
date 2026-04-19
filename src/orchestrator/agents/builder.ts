@@ -4,21 +4,39 @@ import { SafeWriter } from '../fs-sandbox.ts';
 
 export class BuilderAgent extends BaseAgent {
   async run(task: TaskRecord, previousHandoff: HandoffRecord | null, repo: RepoRecord | null): Promise<HandoffPayload> {
-    const prompt = `
-      You are the BUILDER agent. Your sole purpose is to implement code changes.
-      Target Repository Path: ${repo ? repo.path : 'None provided'}
-      Task Goal: ${task.goal}
-      Scope: ${task.scope}
-      Non-goals: ${task.non_goals}
-      Previous Handoff: ${previousHandoff?.message || 'None'}
-      
-      Respond with exactly the files changed, code paths, and test steps.
-      Format changes as:
-      --- FILE: path/to/file ---
-      [CONTENT]
-      --- END ---
-    `;
-    
+    // Extract explicit target file from scope if declared (e.g. "Modify exactly one file: path/to/file")
+    const scopeFileMatch = task.scope.match(/(?:file|target|path)[:\s]+([^\s,."]+\.[a-zA-Z]+)/i)
+      || task.goal.match(/(?:in|to|for)\s+([^\s,]+\.[a-zA-Z]+)/i);
+    const declaredTarget = scopeFileMatch ? scopeFileMatch[1].trim() : null;
+
+    // Read the target file content if it exists, so the LLM can produce a real modified version
+    let existingContent = '';
+    if (declaredTarget && repo) {
+      const fs = require('fs');
+      const pathMod = require('path');
+      const fullPath = pathMod.resolve(repo.path, declaredTarget);
+      if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+        existingContent = fs.readFileSync(fullPath, 'utf-8');
+      }
+    }
+
+    const prompt = `You are the BUILDER agent. You MUST output the COMPLETE modified file content.
+Target Repository: ${repo ? repo.path : 'None'}
+Target File: ${declaredTarget || 'Not specified'}
+Task Goal: ${task.goal}
+Scope: ${task.scope}
+Non-goals: ${task.non_goals}
+Previous Handoff: ${previousHandoff?.message || 'None'}
+
+${existingContent ? `CURRENT FILE CONTENT of ${declaredTarget}:\n\`\`\`\n${existingContent}\`\`\`` : ''}
+
+CRITICAL: You MUST respond with the modified file wrapped in this EXACT format:
+--- FILE: ${declaredTarget || 'path/to/file'} ---
+[complete modified file content here]
+--- END ---
+
+Do NOT respond with commentary only. You MUST include the --- FILE: ... --- block.`;
+
     let responseText = await this.llm.createChatCompletion([{ role: 'system', content: this.record.instruction_profile }, { role: 'user', content: prompt }]);
 
     const stagedMutations: StagedMutationRef[] = [];
@@ -34,7 +52,7 @@ export class BuilderAgent extends BaseAgent {
             const content = match[2];
             try {
                 const isTruthFile = targetPath.includes('AOK_TRUTH_');
-                const allowOverwrite = isTruthFile || task.goal.includes('OVERWRITE');
+                const allowOverwrite = isTruthFile || task.goal.includes('OVERWRITE') || !!declaredTarget;
                 const stageId = await writer.stageMutation(task.id, targetPath, content, 'overwrite', { allowOverwrite });
                 stagedMutations.push({
                     stageId,
@@ -45,6 +63,10 @@ export class BuilderAgent extends BaseAgent {
             } catch (err: any) {
                 responseText += `\n[BUILD ERROR] Failed to stage ${targetPath}: ${err.message}`;
             }
+        }
+
+        if (stagedMutations.length === 0 && declaredTarget) {
+            responseText += '\n[BUILD WARNING] Builder produced no structured FILE blocks. Task will be blocked at engine gate.';
         }
     }
 

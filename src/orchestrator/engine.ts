@@ -112,39 +112,48 @@ export class OrchestratorEngine {
                 const writer = new SafeWriter(repo.path);
 
                 if (stagedMutations.length === 0) {
-                    // No staged mutations found — check for direct filesystem evidence as fallback
-                    let fallbackDetected = false;
-                    
-                    if (task.proof_required) {
+                    // Determine if this is a proof-execution task (uses .aok/temp AOK_TRUTH_ files)
+                    const isProofTask = task.proof_required && task.proof_required.includes('.aok/temp/AOK_TRUTH_');
+
+                    if (isProofTask) {
+                        // PROOF TASK: truth-file semantics allowed as fallback
+                        let proofPassed = false;
                         const fs = require('fs');
                         const pathMod = require('path');
                         const targetPath = pathMod.resolve(repo.path, task.proof_required);
                         if (fs.existsSync(targetPath)) {
                             const content = fs.readFileSync(targetPath, 'utf-8');
                             if (content.trim() !== 'INIT') {
-                                fallbackDetected = true;
+                                proofPassed = true;
                             }
                         }
-                    }
-
-                    // Optional secondary git check
-                    if (!fallbackDetected) {
-                        try {
-                            const { execSync } = require('child_process');
-                            const targets = task.proof_required ? [task.proof_required] : [];
-                            if (targets.length > 0) {
-                                const gitTargets = targets.map((t: string) => require('path').resolve(repo.path, t)).join(' ');
-                                const status = execSync(`git status --porcelain -- ${gitTargets}`, { cwd: repo.path }).toString().trim();
-                                if (status.length > 0) fallbackDetected = true;
-                            }
-                        } catch(e) {
-                            // Git unavailable — not fatal
+                        if (!proofPassed) {
+                            console.error('[Engine] Proof task: truth file not mutated. Refusing DONE.');
+                            updatedTask.blocker = 'NO_STAGED_MUTATIONS';
                         }
-                    }
+                    } else {
+                        // REAL TASK: staged mutations are mandatory.
+                        // Pre-existing file existence NEVER satisfies completion.
+                        // Check git diff as secondary evidence (actual delta required).
+                        let gitDeltaFound = false;
+                        if (task.proof_required) {
+                            try {
+                                const { execSync } = require('child_process');
+                                const pathMod = require('path');
+                                const targetResolved = pathMod.resolve(repo.path, task.proof_required);
+                                // git diff (not status) — requires actual content change, not just existence
+                                const diff = execSync(`git diff -- "${targetResolved}"`, { cwd: repo.path }).toString().trim();
+                                if (diff.length > 0) {
+                                    gitDeltaFound = true;
+                                    console.log(`[Engine] Git delta detected on ${task.proof_required}`);
+                                }
+                            } catch(e) {}
+                        }
 
-                    if (!fallbackDetected) {
-                        console.error('[Engine] No staged mutations found and no filesystem evidence. Refusing DONE.');
-                        updatedTask.blocker = 'NO_STAGED_MUTATIONS';
+                        if (!gitDeltaFound) {
+                            console.error('[Engine] Real task: Builder produced no staged mutations and no git delta on declared target. Refusing DONE.');
+                            updatedTask.blocker = 'NO_ACTIONABLE_MUTATION_OUTPUT';
+                        }
                     }
                 } else {
                     // Process staged mutations: verify then commit
